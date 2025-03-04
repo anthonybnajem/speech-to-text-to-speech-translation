@@ -1,0 +1,16 @@
+
+Github has a great boilerplate .gitignore
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+server/models/__pycache__/
+*.py[cod]
+*.pyc
+
+# Embeddings and Wave audio files
+*.pt
+*.wav
+
+# Client Logs
+client/logs/*.log
+speech-to-speech-env/
