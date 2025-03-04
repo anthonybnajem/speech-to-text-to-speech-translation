@@ -9,25 +9,93 @@ import soundfile as sf
 import speech_recognition as sr
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+import json
+import re
+import torch
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
 # Load a lightweight LLM (change to a more powerful model if needed)
 MODEL_NAME = "facebook/opt-1.3b"  # Alternatives: "mistralai/Mistral-7B-Instruct", "facebook/opt-1.3b"
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Load the tokenizer and model
+
+# # Load the tokenizer and model
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).to(device)
 
-def rewrite_phrase_llm(text):
+# Load a lightweight LLM (change to a more powerful model if needed)
+# MODEL_PATH = "./trained_model"
+# # Load the tokenizer and model
+# tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+# model = AutoModelForCausalLM.from_pretrained(MODEL_PATH).to(device)
+
+def only_rewrite_phrase_llm(text):
     """ Use an LLM to paraphrase the phrase in real time """
-    prompt = f"Rephrase the following sentence, \"{text}\", to be understandable by an autistic person playing a game (e.g. for example: cover me, protect me while I attack)"
+    prompt = f"Rephrase the below, so that an autistic gamer can understand his teamates, imagine you are translating on the spot for him while playing a game online, give me just the output he should hear --> \"{text}\""
+    print(prompt)
     input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
 
     with torch.no_grad():
         output_ids = model.generate(input_ids, max_length=50, temperature=0.7)
 
     rewritten_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    print("rewritten")
+    print(rewritten_text.strip())
+    print("rewritten end")
     return rewritten_text.replace(prompt, "").strip()  # Remove prompt text
+
+def rewrite_phrase_llm(text):
+    """
+    1. Load a known dictionary from basic_map.json (which is an array of {"input": "...", "output": "..."} objects).
+    2. If any 'input' in that array appears in `text` (case-insensitive),
+       replace it and return immediately.
+    3. Otherwise, fall back to an LLM paraphrasing approach.
+    """
+
+    # Load your replacement mappings from JSON
+    with open("basic_map.json", "r", encoding="utf-8") as f:
+        rewrite_data = json.load(f)  # rewrite_data is a list of objects: [{"input": "...", "output": "..."}]
+
+    text_lower = text.lower()
+
+    # Check each known phrase for a case-insensitive substring match
+    for entry in rewrite_data:
+        key = entry["input"]
+        replacement = entry["output"]
+
+        # If this known phrase is in our text, do a case-insensitive replacement
+        if key.lower() in text_lower:
+            # Use a regex to replace exactly the phrase (if you need partial matches, remove \b)
+            pattern = re.compile(re.escape(key), re.IGNORECASE)
+            replaced_text = pattern.sub(replacement, text)
+
+            return replaced_text  # Return once the first match is handled
+        
+    return text
+    # # -- If no match in the dictionary, fall back to LLM paraphrasing --
+    # prompt = (
+    #     f"Rephrase the below, so that an autistic gamer can understand his teammates. "
+    #     f"Imagine you are translating on the spot for him while playing a game online. "
+    #     f"Give me just the output he should hear --> \"{text}\""
+    # )
+    # input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+
+    # with torch.no_grad():
+    #     output_ids = model.generate(
+    #         input_ids,
+    #         max_length=50,
+    #         temperature=0.7,
+    #         # any other generate() parameters you use
+    #     )
+
+    # rewritten_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+
+    # # You might optionally remove the prompt from the final output
+    # # if the model sometimes includes it in the generation:
+    # final_text = rewritten_text.replace(prompt, "").strip()
+
+    # return final_text
+
 
 class SpeechRecognitionModel:
     """ Speech Recognition with Whisper + Real-time Processing """
