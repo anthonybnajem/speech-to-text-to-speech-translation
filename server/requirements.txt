@@ -20,3 +20,6 @@ git+https://github.com/openai/whisper.git
 # Jupyter notebooks
 ipython
 ipykernel
+
+# soundfile
+
