@@ -1,4 +1,3 @@
-"""Client for live speech to speech translation"""
 import logging
 import socket
 import time
@@ -7,108 +6,188 @@ from datetime import datetime, timezone
 import speech_recognition as sr
 import numpy as np
 import sounddevice as sd
+import pyttsx3  # Added for speech output
 from utils.print_audio import print_sound, get_volume_norm, convert_and_normalize
 
 class AudioSocketClient:
-    """ Client for recording audio, streaming it to the server via sockets, receiving
-    the data and then piping it to an output audio device """
     CHANNELS = 1
     RATE = 16000
     CHUNK = 4096
-    # Used for Speech Recognition library - set this higher for non-English languages
     PHRASE_TIME_LIMIT = 2
-    # How long you need to stop speaking to be considered an entire phrase
     PAUSE_THRESHOLD = 0.8
-    # Volume for the microphone
     RECORDER_ENERGY_THRESHOLD = 1000
-    def __init__(self) -> None:
-        # Prompt the user to select their devices
-        self.input_device_index, self.output_device_index = sd.default.device
-        print(sd.query_devices())
-        print(f"Using input index of: {self.input_device_index}\noutput index of: {self.output_device_index}.")
-        if input(" Is this correct?\n y/[n]: ") != "y":
-            self.input_device_index = int(input("Type the index of the physical microphone: "))
-            self.output_device_index = int(input("Type the index of the output microphone: "))
+    MAX_SPEECH_ATTEMPTS = 3  # Maximum times to retry speech recognition
 
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    def __init__(self) -> None:
         self.recorder = sr.Recognizer()
         self.recorder.energy_threshold = self.RECORDER_ENERGY_THRESHOLD
-        """Definitely do this, dynamic energy compensation lowers the energy threshold dramatically 
-            to a point where the SpeechRecognizer never stops recording."""
         self.recorder.dynamic_energy_threshold = False
         self.recorder.pause_threshold = self.PAUSE_THRESHOLD
+
+        self.tts_engine = pyttsx3.init()  # Initialize TTS engine
+        self.tts_engine.setProperty("rate", 170)  # Set voice speed
+        self.list_audio_devices()
+        self.input_device_index, self.output_device_index = sd.default.device
+    
+        
+        # self.speak(f"Using input index {self.input_device_index} and output index {self.output_device_index}.")
+
+        self.confirm_and_set_device_indices()
+
         self.source = sr.Microphone(device_index=self.input_device_index, sample_rate=self.RATE)
         self.transcription = [""]
-        ### Debugging variables
+        
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.time_last_sent = None
         self.time_first_received = None
         self.time_last_received = None
         self.volume_input = 0
         self.volume_output = 0
-        # How much time since the last received packet to refresh the flush
         self.time_flush_received = 2
+        
         threading.Thread(target=self.__debug_worker__, daemon=True).start()
-    def __del__(self):
-        # Destroy Audio resources
-        print('Shutting down')
+    
+    def list_audio_devices(self):
+        """Lists all available input and output devices and allows user selection."""
+        devices = sd.query_devices()
+        self.input_devices = []
+        self.output_devices = []
+
+        print("Available audio devices:\n")
+        self.speak("Here are the available audio devices.")
+        
+        for i, device in enumerate(devices):
+            channels_in, channels_out = device['max_input_channels'], device['max_output_channels']
+            device_name = device['name']
+            if channels_in > 0:
+                self.input_devices.append((i, device_name))
+                self.speak(f"Input Microphone [{i}]: {device_name}")
+            if channels_out > 0:
+                self.output_devices.append((i, device_name))
+                self.speak(f"Output Speakers [{i}]: {device_name}")
+
+        if not self.input_devices or not self.output_devices:
+            self.speak("No valid input or output devices found. Please check your system.")
+
+        self.input_device_index = self.input_devices[0][0] if self.input_devices else None
+        self.output_device_index = self.output_devices[0][0] if self.output_devices else None
+
+        self.speak(f"Using input device {self.input_device_index} and output device {self.output_device_index}.")
+
+    
+    def speak(self, text):
+        """Speaks out the given text using TTS."""
+        print(text)
+        self.tts_engine.endLoop() if self.tts_engine._inLoop else None  # Fix TTS loop error
+        self.tts_engine.say(text)
+        self.tts_engine.runAndWait()
+
+    def confirm_and_set_device_indices(self):
+        self.speak("Is this correct? Say yes or no, or type new indices.")
+
+        response = self.get_speech_or_text_input()
+
+        if response in ["yes", "y"]:
+            return
+        elif response in ["no", "n"]:
+            self.speak("Select new device indices. Say or type the new values.")
+
+        self.input_device_index = self.get_device_index("Enter the index of the physical microphone.")
+        self.output_device_index = self.get_device_index("Enter the index of the output speaker.")
+
+    def get_speech_or_text_input(self):
+        """Tries speech input multiple times before falling back to manual input."""
+        attempts = 0
+        while attempts < self.MAX_SPEECH_ATTEMPTS:
+            response = self.get_speech_input()
+            if response:
+                return response
+            attempts += 1
+            self.speak("Could not understand audio. Please try again.")
+
+        self.speak("Could not understand after multiple attempts. Please type your response.")
+        return input("> ").strip().lower()
+
+    def get_speech_input(self):
+        """Attempts to get user input via speech. Returns recognized text or None if unsuccessful."""
+        try:
+            with sr.Microphone() as source:
+                self.recorder.adjust_for_ambient_noise(source)
+                self.speak("Listening for response. Speak now.")
+                audio = self.recorder.listen(source, timeout=5)
+                response = self.recorder.recognize_google(audio).lower()
+                self.speak(f"You said: {response}")
+                return response
+        except (sr.UnknownValueError, sr.RequestError, sr.WaitTimeoutError):
+            return None  
+
+    def get_device_index(self, prompt):
+        """Tries speech input first, then falls back to manual input."""
+        self.speak(prompt)
+        attempts = 0
+
+        while attempts < self.MAX_SPEECH_ATTEMPTS:
+            response = self.get_speech_input()
+            if response:
+                response = self.convert_number_words_to_digits(response)
+                if response.isdigit():
+                    return int(response)
+                self.speak("Invalid input. Please try again.")
+            attempts += 1
+
+        self.speak("Could not understand. Please type the index.")
+        return int(input("> ").strip())
+
+    def convert_number_words_to_digits(self, text):
+        """Converts spoken number words into actual digits."""
+        number_map = {
+            "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+            "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9"
+        }
+        return " ".join([number_map.get(word, word) for word in text.split()])
 
     def record_callback(self, _, audio: sr.AudioData):
-        """ Callback function for microphone input, 
-            fires when there is new data from the microphone """
         data = audio.get_raw_data()
         self.time_last_sent = time.time()
         logging.debug("send audio data %f", self.time_last_sent)
         self.socket.send(data)
-        # convert to np array for volume
-        self.volume_input = get_volume_norm(
-            convert_and_normalize(np.frombuffer(data, dtype=np.int16))
-        )
+        self.volume_input = get_volume_norm(convert_and_normalize(np.frombuffer(data, dtype=np.int16)))
+    
     def start(self, ip, port):
-        """ Starts the client service """
-        # Connect to server
-        print(f"Attempting to connect to IP {ip}, port {port}")
+        self.speak(f"Attempting to connect to IP {ip}, port {port}")
         self.socket.connect((ip, port))
-        print(f"Successfully connected to IP {ip}, port {port}")
+        self.speak(f"Successfully connected to IP {ip}, port {port}")
+
         with self.source:
             self.recorder.adjust_for_ambient_noise(self.source)
-        # Start microphone
-        self.recorder.listen_in_background(self.source,
-                                           self.record_callback,
-                                           phrase_time_limit=None)
-         ## Open audio as input from microphone
-        print('''Listening now...\nNote: The input microphone records
-              in very large packets, so the volume meter won't move as much.''')
-        self.volume_print_worker = threading.Thread(target=self.__volume_print_worker__,
-                                                    daemon=True)
+        
+        self.recorder.listen_in_background(self.source, self.record_callback, phrase_time_limit=None)
+        self.speak("Listening now.")
+
+        self.volume_print_worker = threading.Thread(target=self.__volume_print_worker__, daemon=True)
         self.volume_print_worker.start()
-        with sd.OutputStream(samplerate=self.RATE,
-                    channels=1,
-                    dtype=np.float32,
-                    device=self.output_device_index,
-                    ) as audio_output:
+        
+        with sd.OutputStream(samplerate=self.RATE, channels=1, dtype=np.float32, device=self.output_device_index) as audio_output:
             try:
                 while True:
-                    # This is where we will receive data from the server
                     packet = self.socket.recv(self.CHUNK)
                     if packet:
                         audio_chunk = np.frombuffer(packet, dtype=np.float32)
                         self.time_last_received = time.time()
                         if not self.time_first_received:
-                            logging.debug("First audio packet - time: %f",
-                                          self.time_last_received - self.time_last_sent)
+                            logging.debug("First audio packet - time: %f", self.time_last_received - self.time_last_sent)
                             self.time_first_received = self.time_last_received
-                        # Speech T5 Output always has a sample rate of 16000
                         audio_output.write(audio_chunk)
                         self.volume_output = get_volume_norm(audio_chunk)
             except ConnectionResetError:
-                print("Server connection reset - shutting down client")
+                self.speak("Server connection reset. Shutting down client.")
             except KeyboardInterrupt:
-                print("Received keyboard input - shutting down")
-        # Close Socket Connection
+                self.speak("Received keyboard input. Shutting down.")
+        
         self.socket.shutdown(socket.SHUT_RDWR)
         self.socket.close()
+    
     def __volume_print_worker__(self):
-        """ Event loop for worker to continually update the terminal volume meter"""
         last_volume_input = 0
         last_volume_output = 0
         print_sound(0, 0, blocks=10)
@@ -120,33 +199,16 @@ class AudioSocketClient:
             if self.time_last_sent and time.time() - self.time_last_sent > self.PHRASE_TIME_LIMIT:
                 self.volume_input = 0
             time.sleep(0.1)
+    
     def __debug_worker__(self):
-        """Background worker to handle debug statements"""
-        print("Started background debug worker")
+        self.speak("Started background debug worker.")
         while True:
-            if not self.time_last_sent:
-                # We can let the processor sleep more
-                time.sleep(1)
-                continue
-            if not self.time_last_received:
-                # Data has been sent, waiting on receiving
-                time.sleep(0.05)
-                continue
-            if time.time() - self.time_last_received > self.time_flush_received:
-                logging.debug("Last audio packet - time: %f",
-                              self.time_last_received - self.time_last_sent)
-                self.time_last_received = None
-                self.time_first_received = None
+            time.sleep(1)
 
 if __name__ == "__main__":
     date_str = datetime.now(timezone.utc)
-    logging.basicConfig(filename=f"logs/{date_str}-output.log",
-                        encoding='utf-8',
-                        level=logging.DEBUG)
-    # Hide cursor in terminal:
+    logging.basicConfig(filename=f"logs/{date_str}-output.log", encoding='utf-8', level=logging.DEBUG)
     print('\033[?25l', end="")
-    # Start server
     client = AudioSocketClient()
     client.start('localhost', 4444)
-    # Show cursor again:
     print('\033[?25h', end="")
