@@ -1,5 +1,4 @@
 sounddevice
 SpeechRecognition
-pyobjc-framework-CoreBluetooth
 pybluez
 pyttsx3

@@ -8,6 +8,7 @@ import numpy as np
 import sounddevice as sd
 import pyttsx3  # Added for speech output
 from utils.print_audio import print_sound, get_volume_norm, convert_and_normalize
+import subprocess
 
 class AudioSocketClient:
     CHANNELS = 1
@@ -48,31 +49,81 @@ class AudioSocketClient:
         threading.Thread(target=self.__debug_worker__, daemon=True).start()
     
     def list_audio_devices(self):
-        """Lists all available input and output devices and allows user selection."""
+        """Lists all available input, output, and Bluetooth devices."""
         devices = sd.query_devices()
         self.input_devices = []
         self.output_devices = []
+        self.bluetooth_devices = []
 
         print("Available audio devices:\n")
         self.speak("Here are the available audio devices.")
-        
+
         for i, device in enumerate(devices):
             channels_in, channels_out = device['max_input_channels'], device['max_output_channels']
             device_name = device['name']
+            is_bluetooth = "bluetooth" in device_name.lower() or "airpods" in device_name.lower()
+
             if channels_in > 0:
                 self.input_devices.append((i, device_name))
                 self.speak(f"Input Microphone [{i}]: {device_name}")
             if channels_out > 0:
                 self.output_devices.append((i, device_name))
                 self.speak(f"Output Speakers [{i}]: {device_name}")
+            if is_bluetooth:
+                self.bluetooth_devices.append((i, device_name))
+                self.speak(f"Bluetooth Device [{i}]: {device_name}")
 
+        # Detect Bluetooth devices separately
+        self.detect_bluetooth_devices()
+
+        # Print all detected devices
+        if self.bluetooth_devices:
+            self.speak("Bluetooth audio devices found.")
         if not self.input_devices or not self.output_devices:
             self.speak("No valid input or output devices found. Please check your system.")
 
+        # Set default device indexes
         self.input_device_index = self.input_devices[0][0] if self.input_devices else None
         self.output_device_index = self.output_devices[0][0] if self.output_devices else None
 
         self.speak(f"Using input device {self.input_device_index} and output device {self.output_device_index}.")
+
+    def detect_bluetooth_devices(self):
+            """Detects Bluetooth audio devices using bluetoothctl."""
+            try:
+                output = subprocess.check_output("bluetoothctl devices", shell=True).decode()
+                devices = [line.split("Device ")[1] for line in output.strip().split("\n") if "Device" in line]
+
+                if devices:
+                    for i, device in enumerate(devices, start=len(self.input_devices) + len(self.output_devices)):
+                        device_mac, device_name = device.split(maxsplit=1)
+                        self.bluetooth_devices.append((i, device_name))
+                        self.speak(f"Bluetooth Audio Device [{i}]: {device_name} ({device_mac})")
+            except Exception as e:
+                self.speak(f"Error detecting Bluetooth devices: {e}")
+
+    def connect_bluetooth_device(self):
+        """Connects to a Bluetooth device using Bluetoothctl."""
+        self.speak("Searching for Bluetooth devices.")
+        try:
+            output = subprocess.check_output("bluetoothctl devices", shell=True).decode()
+            devices = [line.split()[-1] for line in output.strip().split("\n") if "Device" in line]
+            
+            if devices:
+                self.speak(f"Found {len(devices)} Bluetooth devices. Connecting to the first available.")
+                mac_address = devices[0]  # Select the first Bluetooth device
+                
+                # Connect the device
+                subprocess.run(f"bluetoothctl connect {mac_address}", shell=True)
+                self.speak(f"Connected to Bluetooth device {mac_address}.")
+                return True
+            else:
+                self.speak("No Bluetooth devices found.")
+                return False
+
+        except Exception as e:
+            self.speak(f"Error connecting to Bluetooth device: {e}")
+            return False
 
     
     def speak(self, text):
@@ -155,38 +206,20 @@ class AudioSocketClient:
     
     def start(self, ip, port):
         self.speak(f"Attempting to connect to IP {ip}, port {port}")
+
+        # Try connecting to Bluetooth devices first
+        if self.connect_bluetooth_device():
+            self.speak("Bluetooth audio device connected.")
+
         self.socket.connect((ip, port))
         self.speak(f"Successfully connected to IP {ip}, port {port}")
 
         with self.source:
             self.recorder.adjust_for_ambient_noise(self.source)
-        
+
         self.recorder.listen_in_background(self.source, self.record_callback, phrase_time_limit=None)
         self.speak("Listening now.")
 
-        self.volume_print_worker = threading.Thread(target=self.__volume_print_worker__, daemon=True)
-        self.volume_print_worker.start()
-        
-        with sd.OutputStream(samplerate=self.RATE, channels=1, dtype=np.float32, device=self.output_device_index) as audio_output:
-            try:
-                while True:
-                    packet = self.socket.recv(self.CHUNK)
-                    if packet:
-                        audio_chunk = np.frombuffer(packet, dtype=np.float32)
-                        self.time_last_received = time.time()
-                        if not self.time_first_received:
-                            logging.debug("First audio packet - time: %f", self.time_last_received - self.time_last_sent)
-                            self.time_first_received = self.time_last_received
-                        audio_output.write(audio_chunk)
-                        self.volume_output = get_volume_norm(audio_chunk)
-            except ConnectionResetError:
-                self.speak("Server connection reset. Shutting down client.")
-            except KeyboardInterrupt:
-                self.speak("Received keyboard input. Shutting down.")
-        
-        self.socket.shutdown(socket.SHUT_RDWR)
-        self.socket.close()
-    
     def __volume_print_worker__(self):
         last_volume_input = 0
         last_volume_output = 0

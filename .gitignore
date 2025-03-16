@@ -14,3 +14,5 @@ server/models/__pycache__/
 # Client Logs
 client/logs/*.log
 speech-to-speech-env/
+env-client/
+myenv/
